@@ -1321,6 +1321,15 @@ def sofa_preprocess(cfg):
                 filtered_groups.append({'group': group,
                                         'color': filter.color,
                                         'keyword': filter.keyword})
+        ###  Apply filters for strace traces
+        filtered_groups = []
+        if len(strace_traces) > 0:
+            df_grouped = strace_traces.groupby('name')
+            for filter in cfg.strace_filters:
+                group = strace_traces[strace_traces['name'].str.contains( filter.keyword)]
+                filtered_groups.append({'group': group,
+                                        'color': filter.color,
+                                        'keyword': filter.keyword})
     # ### hierarchical swarm generation
     try:
         swarm_groups = []
