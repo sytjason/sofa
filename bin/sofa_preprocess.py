@@ -830,7 +830,7 @@ def sofa_preprocess(cfg):
 
                         trace = [
                             t_begin,
-                            event,
+                            0,
                             nvsmi_sm,
                             deviceId,
                             copyKind,
@@ -847,7 +847,7 @@ def sofa_preprocess(cfg):
 
                         trace = [
                             t_begin,
-                            event,
+                            1,
                             nvsmi_mem,
                             deviceId,
                             copyKind,
@@ -866,7 +866,8 @@ def sofa_preprocess(cfg):
                 if len(nvsmi_sm_list)>1:
                     nvsmi_sm_traces = list_to_csv_and_traces(logdir, nvsmi_sm_list, 'nvsmi_trace.csv', 'w')
                     nvsmi_mem_traces = list_to_csv_and_traces(logdir, nvsmi_mem_list, 'nvsmi_trace.csv', 'a')
-
+                else:
+                    print_warning("Program exectution time is fewer than 3 seconds, so nvsmi trace analysis will not be displayed.")
     # ============ Preprocessing Network Trace ==========================
     filtered_net_groups = []
     if os.path.isfile('%s/sofa.pcap' % logdir):
@@ -1278,9 +1279,12 @@ def sofa_preprocess(cfg):
     if perf_timebase_unix == 0:
         with open(logdir + 'perf_timebase.txt') as f:
             lines = f.readlines()
-            perf_timebase_uptime = float(lines[-2].split()[2].split(':')[0])
-            perf_timebase_unix = float(lines[-1].split()[0])
-
+            if len(lines) > 3:
+                perf_timebase_uptime = float(lines[-2].split()[2].split(':')[0])
+                perf_timebase_unix = float(lines[-1].split()[0])
+            else:
+                print_warning('Recorded progrom is too short.')
+                sys.exit(1)
     with open(logdir + 'perf.script') as f:
         samples = f.readlines()
         print_info(cfg,"Length of cpu_traces = %d" % len(samples))

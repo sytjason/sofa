@@ -1,4 +1,6 @@
 import argparse
+import matplotlib
+matplotlib.use('agg')
 import csv
 import json
 import multiprocessing as mp
@@ -17,7 +19,6 @@ from sofa_common import *
 from sofa_config import *
 from sofa_hsg import *
 from sofa_print import *
-
 import grpc
 import potato_pb2
 import potato_pb2_grpc
@@ -52,7 +53,81 @@ def get_hint(features):
     print(hint)
     print(docker_image) 
     return hint, docker_image 
-     
+
+def dynamic_top_down(logdir, cfg, df_mpstat, df_cpu, df_gpu, features):
+    print_title("Dynamic Top-Down Analysis")
+
+    total_elapsed_time = {'usr':0, 'sys':0, 'gpu':0, 'iow':0} 
+    elapsed_time_ratio = {'usr':0, 'sys':0, 'gpu':0, 'iow':0} 
+   
+    if len(df_mpstat) == 0 or len(df_cpu) == 0:
+        print_warning('no mpstat and perf traces!')
+        return features
+
+    t_begin = df_mpstat.iloc[0]['timestamp']
+    t_end = df_mpstat.iloc[-1]['timestamp']
+    
+    t = t_begin
+    while t < t_end:
+        window_begin = t - 0.1 
+        window_end = t
+        t = t + 0.1
+        
+        if df_cpu.iloc[0].timestamp > window_end:
+            continue
+        cond1 = (df_cpu['timestamp'] > window_begin)
+        cond2 = (df_cpu['timestamp'] <= window_end)
+        df_cpu_interval = df_cpu[ cond1 & cond2 ]
+        
+        cond1 = (df_gpu['timestamp'] > window_begin)
+        cond2 = (df_gpu['timestamp'] <= window_end)
+        df_gpu_interval = df_gpu[ cond1 & cond2 ]
+        
+        cond1 = (df_mpstat['timestamp'] > window_begin)
+        cond2 = (df_mpstat['timestamp'] <= window_end)
+        df_mpstat_interval = df_mpstat[ cond1 & cond2 ]
+        mp_usr = []
+        mp_sys = []
+        mp_iow = []
+        for i in range(len(df_mpstat_interval)):
+            ratios = df_mpstat_interval.iloc[i]['name'].split(':')[1].split('|') 
+            #print(ratios)
+            mp_usr.append(0.1*int(ratios[1])/100.0)
+            mp_sys.append(0.1*int(ratios[2])/100.0)
+            mp_iow.append(0.1*int(ratios[4])/100.0)
+        mp_usr = np.asarray(mp_usr)
+        mp_sys = np.asarray(mp_sys)
+        mp_iow = np.asarray(mp_iow)
+
+        elapsed_time = {'usr':0, 'sys':0, 'gpu':0, 'iow':0} 
+
+        if len(df_mpstat_interval) > 0:
+            elapsed_time['usr'] = mp_usr.max()
+            elapsed_time['sys'] = mp_sys.max()
+            elapsed_time['gpu'] = df_gpu_interval['duration'].sum()
+            elapsed_time['iow'] = mp_iow.max()
+            dominator = max(elapsed_time, key=elapsed_time.get)
+            if elapsed_time['gpu'] > 0 :
+                dominator = 'gpu'
+            total_elapsed_time[dominator] = total_elapsed_time[dominator] + 0.1
+
+    total_all_elapsed_time = sum(total_elapsed_time.values())
+    if total_all_elapsed_time > 0 :
+        elapsed_time_ratio['usr'] = 100 * total_elapsed_time['usr'] / total_all_elapsed_time 
+        elapsed_time_ratio['sys'] = 100 * total_elapsed_time['sys'] / total_all_elapsed_time 
+        elapsed_time_ratio['gpu'] = 100 * total_elapsed_time['gpu'] / total_all_elapsed_time 
+        elapsed_time_ratio['iow'] = 100 * total_elapsed_time['iow'] / total_all_elapsed_time 
+        print('Elapsed Time = %.1lf ' % total_all_elapsed_time)
+        print('USR = %.1lf %%' % elapsed_time_ratio['usr'])
+        print('SYS = %.1lf %%' % elapsed_time_ratio['sys'])
+        print('GPU = %.1lf %%' % elapsed_time_ratio['gpu'])
+        print('IOW = %.1lf %%' % elapsed_time_ratio['iow'])
+        df = pd.DataFrame({'name':['elapsed_usr_time_ratio', 'elapsed_sys_time_ratio', 'elapsed_gpu_time_ratio', 'elapsed_iow_time_ratio'], 
+                        'value':[elapsed_time_ratio['usr'],elapsed_time_ratio['sys'],elapsed_time_ratio['gpu'],elapsed_time_ratio['iow'] ] }, 
+                        columns=['name','value'])
+        features = pd.concat([features, df])
+
+    return features
 
 def payload_sum(df):
     print((len(df)))
@@ -68,6 +143,28 @@ class Event:
     def __repr__(self):
         return repr((self.name, self.ttype, self.timestamp, self.duration))
 
+def nvsmi_profile(logdir, cfg, df_nvsmi, features):
+    print_title("SM & MEM Profiling")
+    
+    if len(df_nvsmi) > 0 :
+        sm_start = df_nvsmi.iloc[0].timestamp 
+        sm_end = df_nvsmi.iloc[-1].timestamp
+        SM_time = sm_end - sm_start
+        result = df_nvsmi.groupby(['deviceId','event'])['duration'].mean() 
+        result = result.astype(int)
+        print(result)
+        
+        gpu_sm_util = df_nvsmi.groupby(['event'])['duration'].mean()[0]
+        gpu_mem_util = df_nvsmi.groupby(['event'])['duration'].mean()[1]
+        print('Average SM Utilization (%): ', int(gpu_sm_util))
+        print('Average MEM Utilization (%): ', int(gpu_mem_util))
+        print('Active GPU Time (s): %.3lf' % (SM_time * gpu_sm_util/100.0))
+        df = pd.DataFrame({'name':['gpu_sm_util', 'gpu_mem_util'], 
+                        'value':[gpu_sm_util, gpu_mem_util] }, 
+                        columns=['name','value'])
+        features = pd.concat([features, df])
+
+    return features
 
 def gpu_profile(logdir, cfg, df_gpu, features):
     print_title("GPU Profiling")
@@ -161,12 +258,19 @@ def vmstat_profile(logdir, cfg, df, features):
     vmstat_traces = pd.DataFrame(records)
     vmstat_traces.columns = vmstat_fieldnames
 
-    print('sum of vmstat bi: ',vmstat_traces['bi'].sum())
-    print('sum of vmstat bo: ',vmstat_traces['bo'].sum())
-    print('max of vmstat wa (%%): %d' % vmstat_traces['wa'].max())
-    print('mean of vmstat wa (%%): %.2lf' % vmstat_traces['wa'].mean())
+    vm_bi = vmstat_traces['bi'].mean()
+    vm_bo = vmstat_traces['bo'].mean()
+    vm_cs = vmstat_traces['cs'].mean()
+    vm_in = vmstat_traces['in'].mean()
+    print('sum of vmstat bi: ', vm_cs)
+    print('sum of vmstat bo: ', vm_in)
+    print('sum of vmstat cs: ', vm_bi)
+    print('sum of vmstat in: ', vm_bo)
 
-def mpstat_topdown(cfg, df_mpstat, features):
+    df_feature = pd.DataFrame({ 'name':['vm_bi', 'vm_bo', 'vm_cs', 'vm_in' ], 
+                        'value':[vm_bi, vm_bo, vm_cs, vm_in] }, 
+                        columns=['name','value'])
+    features = pd.concat([features, df_feature])   
 
     return features
 
@@ -220,54 +324,13 @@ def mpstat_profile(logdir, cfg, df, features):
 
     total_cpu_time = df_summary[['USR','SYS','IRQ']].sum().sum()
     print('Active CPU Time (s): %.3lf' % total_cpu_time) 
-    active_cpu_ratio = int(100*total_cpu_time / (num_cores*cfg.elapsed_time))
-    print('Active CPU ratio (%%): %3d' % active_cpu_ratio)
-    df_feature = pd.DataFrame({ 'name':['num_cores', 'active_cpu_ratio'], 
-                        'value':[num_cores, active_cpu_ratio] }, 
+    cpu_util = int(100*total_cpu_time / (num_cores*cfg.elapsed_time))
+    print('Active CPU ratio (%%): %3d' % cpu_util)
+    df_feature = pd.DataFrame({ 'name':['num_cores', 'cpu_util'], 
+                        'value':[num_cores, cpu_util] }, 
                         columns=['name','value'])
     features = pd.concat([features, df_feature])   
     return features
-
-class ProfiledDomainDNN:
-    domain_name = "DNN"
-    prefix = "[ProfiledDomain%s]\t" % domain_name
-
-    def __init__(self):
-        self.name = "general"
-        self.batch_size = 64
-        self.iterations = 11
-        self.throughput = 1
-        self.avg_cpu_time = 1
-
-    def get_batch_size(self, filepath):
-        with open(filepath) as f:
-            lines = f.readlines()
-            for line in lines:
-                pos = line.find("--batch_size")
-                if pos >= 0:
-                    self.batch_size = int(line[pos:].split()[0].split('=')[1])
-                    print((self.prefix + "batch_size: %d" % self.batch_size))
-                    break
-
-    def get_iterations(self, filepath):
-        with open(filepath) as f:
-            lines = f.readlines()
-            for line in lines:
-                pos = line.find("--num_batches")
-                if pos >= 0:
-                    self.iterations = int(
-                        line[pos:].split()[0].split('=')[1]) + 11
-                    print((self.prefix + "iterations: %d" % self.iterations))
-                    break
-
-    def get_throughput(self, filepath):
-        with open(filepath) as f:
-            lines = f.readlines()
-            for line in lines:
-                if line.find("total images/sec:") != -1:
-                    self.throughput = float(line.split()[2])
-                    print((self.prefix + "Throughput: %.2lf" % self.throughput))
-                    break
 
 
 def sofa_analyze(cfg):
@@ -292,6 +355,7 @@ def sofa_analyze(cfg):
     filein_vmstat = logdir + "vmstat.csv"
     filein_mpstat = logdir + "mpstat.csv"
     filein_strace = logdir + "strace.csv"
+    filein_nvsmi = logdir + "nvsmi_trace.csv"
 
     if os.path.isfile('%s/nvlink_topo.txt' % logdir):
 
@@ -375,11 +439,24 @@ def sofa_analyze(cfg):
         print_warning("%s is not found" % filein_mpstat)
 
     try:
+        df_nvsmi = pd.read_csv(filein_nvsmi) 
+        features = nvsmi_profile(logdir, cfg, df_nvsmi, features)
+    except IOError:
+        print_warning("nvsmi_trace.csv is not found")
+
+    try:
         df_gpu = pd.read_csv(filein_gpu)
         features = gpu_profile(logdir, cfg, df_gpu, features)
     except IOError:
         df_gpu = pd.DataFrame([], columns=cfg.columns)
         print_warning("%s is not found. If there is no need to profile GPU, just ignore it." % filein_gpu)
+
+    try:
+        features = dynamic_top_down(logdir, cfg, df_mpstat, df_cpu, df_gpu, features)
+    except IOError as e:
+        print_warning("Some files are not found, which are needed for dynamic_top_down analysis")
+
+
 
     if cfg.enable_aisi:
         selected_pattern, iter_summary = sofa_aisi(logdir, cfg, df_cpu, df_gpu, df_strace, df_mpstat)
