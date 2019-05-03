@@ -48,6 +48,8 @@ def service_get_diskstat(logdir):
         if time_remained > 0: 
             time.sleep(time_remained)
 
+
+
 def get_cpuinfo(logdir):
     with open('/proc/cpuinfo','r') as f:
         lines = f.readlines()
@@ -324,6 +326,25 @@ def sofa_record(command, cfg):
             f_misc.write('cores %d\n' % (cores))
             f_misc.write('vcores %d\n' % (vcores))
             f_misc.write('pid %d\n' % (target_pid))
+
+            # get sector size
+            with open('/proc/diskstats','r') as f:
+                lines = f.readlines()
+                for line in lines:
+                    m = line[:-1]
+                    m = line.split()
+                    dev = m[2]
+                    try:
+                        f = open('/sys/block/'+dev+'/queue/hw_sector_size')
+                        s = f.readline()
+                        s = re.match("\d+", s)
+                        secsize = int(s.group())
+                        
+                        # save sector size of dev to misc.txt
+                        f_misc.write("%s %d\n" % (dev, secsize))
+                    except:
+                        pass
+
 
         print_progress("Epilogue of Recording...")
         if p_tcpdump != None:
