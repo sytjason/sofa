@@ -518,7 +518,7 @@ def sofa_preprocess(cfg):
             lines = f_misc.readlines()
             last_secsize = 512
             for dev in np.unique(devs):
-                secsize = [l[:-1].split()[1] for l in lines if dev in l]
+                secsize = [l[:-1].split()[1] for l in lines if re.match(r'\b'+dev+r'\b', l)]
                 if secsize:
                     secsize = int(np.array(secsize))
                 else:
