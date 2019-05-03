@@ -511,6 +511,22 @@ def sofa_preprocess(cfg):
         devs = list(map(lambda x: x[1], tmp_list))
         n_dev = len(set(devs)) 
 
+        
+        # get sector size
+        devdict = {}
+        with open('%s/misc.txt' % logdir) as f_misc:
+            lines = f_misc.readlines()
+            last_secsize = 512
+            for dev in np.unique(devs):
+                secsize = [l[:-1].split()[1] for l in lines if dev in l]
+                if secsize:
+                    secsize = int(np.array(secsize))
+                else:
+                    secsize = last_secsize
+                last_secsize = secsize
+                devdict.update({dev: secsize})
+
+
         for i in range(len(diskstats)):
             if i < n_dev:
                 continue
@@ -520,15 +536,7 @@ def sofa_preprocess(cfg):
             m_last = diskstats[i-n_dev][:-1]
             m_last = m_last.split(',')
 
-            # get sector size
-            try:
-                f = open('/sys/block/'+dev+'/queue/hw_sector_size')
-                s = f.readline()
-                s = re.match("\d+", s)
-                secsize = int(s.group())
-            except:
-                pass
-
+            secsize = devdict[dev]
             d_read = int(m[2]) - int(m_last[2])
             d_read *= secsize
             d_write = int(m[3]) - int(m_last[3])
